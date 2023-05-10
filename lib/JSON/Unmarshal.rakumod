@@ -196,42 +196,60 @@ multi _unmarshal(Any:D $json, Bool, Bool :$opt-in) {
 }
 
 multi _unmarshal(Any:D $json, Any $obj is raw, Bool :$opt-in) {
-    my %args;
-    my \type = $obj.HOW.archetypes.nominalizable ?? $obj.^nominalize !! $obj.WHAT;
-    my %local-attrs =  type.^attributes(:local).map({ $_.name => $_.package });
-    for type.^attributes -> $attr {
-        my $*JSON-UNMARSHAL-ATTR = $attr;
-        if %local-attrs{$attr.name}:exists && !(%local-attrs{$attr.name} === $attr.package ) {
-            next;
-        }
-        if $opt-in && $attr !~~ JSON::OptIn::OptedInAttribute {
-            next;
-        }
-        my $attr-name = $attr.name.substr(2);
-        my $json-name = do if  $attr ~~ JSON::Name::NamedAttribute {
-            $attr.json-name;
-        }
-        else {
-            $attr-name;
-        }
-        if $json{$json-name}:exists {
-            my Mu $attr-type := $attr.type;
-            %args{$attr-name} := do if $attr ~~ CustomUnmarshaller {
-                $attr.unmarshal($json{$json-name}, $attr-type)
-            }
-            elsif $attr-type.HOW.archetypes.nominalizable
-                && $attr-type.HOW.archetypes.coercive
-                && $json{$json-name} ~~ $attr-type
-            {
-                # No need to unmarshal, coercion will take care of it
-                $json{$json-name}
-            }
-            else {
-                _unmarshal($json{$json-name}, $attr-type, :$opt-in)
-            }
-        }
-    }
-    type.new(|%args)
+   my %args;
+   my \type = $obj.HOW.archetypes.nominalizable ?? $obj.^nominalize !! $obj.WHAT;
+
+   # cw: See if $obj has a single-arg constructor for $json. If so, use that.
+   if $json !~~ Hash {
+     my \multis = $obj.WHAT.^can("new");
+     return $obj.WHAT.new(|$json)
+       if multis.map({ .cando( \(type, |$json.List.map({ .WHAT })) ) })
+                .grep({ .head.signature.params.head.type !=:= Mu });
+   }
+
+   my %local-attrs =  type.^attributes(:local).map({ $_.name => $_.package });
+
+   for type.^attributes -> $attr {
+       my $*JSON-UNMARSHAL-ATTR = $attr;
+       if %local-attrs{$attr.name}:exists && !(%local-attrs{$attr.name} === $attr.package ) {
+           next;
+       }
+       if $opt-in && $attr !~~ JSON::OptIn::OptedInAttribute {
+           next;
+       }
+       my $attr-name = $attr.name.substr(2);
+       my $json-name = do if  $attr ~~ JSON::Name::NamedAttribute {
+           $attr.json-name;
+       }
+       else {
+           $attr-name;
+       }
+       my $alias-name = do if $attr ~~ JSON::Name::AliasedAttribute {
+           $attr.alias-name
+       }
+       else {
+           '';
+       }
+
+       my $json-value = $json{$json-name} // $json{$alias-name};
+       if ( $json{$json-name}:exists ) || ( $json{$alias-name}:exists ) {
+           my Mu $attr-type := $attr.type;
+           %args{$attr-name} := do if $attr ~~ CustomUnmarshaller {
+               $attr.unmarshal($json-value, $attr-type)
+           }
+           elsif $attr-type.HOW.archetypes.nominalizable
+               && $attr-type.HOW.archetypes.coercive
+               && $json-value ~~ $attr-type
+           {
+               # No need to unmarshal, coercion will take care of it
+               $json-value
+           }
+           else {
+               _unmarshal($json-value, $attr-type, :$opt-in)
+           }
+       }
+   }
+   type.new(|%args)
 }
 
 multi _unmarshal($json, @x, Bool :$opt-in) {
